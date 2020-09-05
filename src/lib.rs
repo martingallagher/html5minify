@@ -1,26 +1,36 @@
 #![feature(test)]
 #![warn(missing_docs)]
+#![deny(warnings, clippy::pedantic, clippy::nursery)]
 
 //! HTML5 markup minifier.
 
-use std::io::{self, Read, Write};
-use std::ops::Deref;
+use std::io;
 
-use html5ever::rcdom::{Node, NodeData, RcDom};
 use html5ever::tendril::TendrilSink;
-use html5ever::{local_name, parse_document, Attribute, LocalName, QualName};
+use html5ever::{parse_document, Attribute, ParseOpts, QualName};
+use markup5ever_rcdom::{Node, NodeData, RcDom};
 
 /// Defines the minify trait.
 pub trait Minify {
     /// Minifies the source returning the minified HTML5.
-    fn minify(&self) -> Result<String, io::Error>;
+    ///
+    /// # Errors
+    ///
+    /// Will return `Err` if unable to read from the input reader or unable to
+    /// write to the output writer.
+    fn minify(&self) -> Result<Vec<u8>, io::Error>;
 }
 
 /// Minifies the HTML input to the destination writer.
 /// Outputs HTML5; non-HTML5 input will be transformed to HTML5.
+///
+/// # Errors
+///
+/// Will return `Err` if unable to read from the input reader or unable to write
+/// to the output writer.
 #[inline]
-pub fn minify(mut r: &mut dyn Read, w: &mut dyn Write) -> io::Result<()> {
-    let dom = parse_document(RcDom::default(), Default::default())
+pub fn minify<R: io::Read, W: io::Write>(mut r: &mut R, w: &mut W) -> io::Result<()> {
+    let dom = parse_document(RcDom::default(), ParseOpts::default())
         .from_utf8()
         .read_from(&mut r)?;
 
@@ -28,49 +38,42 @@ pub fn minify(mut r: &mut dyn Read, w: &mut dyn Write) -> io::Result<()> {
     Minifier { w }.minify(&dom.document)
 }
 
-impl Minify for str {
-    fn minify(&self) -> Result<String, io::Error> {
+impl<T> Minify for T
+where
+    T: AsRef<[u8]>,
+{
+    #[inline]
+    fn minify(&self) -> Result<Vec<u8>, io::Error> {
         let mut minified = Vec::new();
 
-        minify(&mut self.as_bytes(), &mut minified)?;
+        minify(&mut self.as_ref(), &mut minified)?;
 
-        Ok(String::from_utf8_lossy(&minified).into())
+        Ok(minified)
     }
 }
 
-impl Minify for Node {
-    /// This trait implementation doesn't add the HTML5 doctype on the
-    /// assumption it could be used to minify interior nodes.
-    fn minify(&self) -> Result<String, io::Error> {
-        let mut minified = Vec::new();
-
-        Minifier { w: &mut minified }.minify(&self)?;
-
-        Ok(String::from_utf8_lossy(&minified).into())
-    }
+struct Minifier<'a, W: io::Write> {
+    w: &'a mut W,
 }
 
-struct Minifier<'a> {
-    w: &'a mut dyn Write,
-}
-
-impl<'a> Minifier<'a> {
+impl<'a, W> Minifier<'a, W>
+where
+    W: io::Write,
+{
+    #[inline]
     fn minify(&mut self, node: &Node) -> io::Result<()> {
         match node.data {
             NodeData::Text { ref contents } => {
                 let contents = contents.borrow();
-                let trim = if let Some(ref parent) = node.parent.take() {
-                    match parent.upgrade() {
-                        Some(ref parent) => !is_inline_element(parent),
-                        _ => false,
-                    }
-                } else {
-                    true
-                };
+                let trim = node.parent.take().map_or(true, |parent| {
+                    parent
+                        .upgrade()
+                        .map_or(false, |ref parent| !is_inline_element(parent))
+                });
                 let contents = if trim {
                     contents.trim_matches(is_whitespace)
                 } else {
-                    contents.deref()
+                    contents.as_ref()
                 };
 
                 if contents.is_empty() {
@@ -93,20 +96,21 @@ impl<'a> Minifier<'a> {
                 ..
             } => {
                 let attrs = attrs.borrow();
-                let omit_start_element = attrs.is_empty() && omit_start_element(&name.local);
+                let tag = name.local.as_ref();
+                let omit_start_element = attrs.is_empty() && omit_start_element(tag);
 
                 if !omit_start_element {
                     self.write_start_tag(name, &attrs)?;
                 }
 
-                if can_have_children(&name.local) {
+                if can_have_children(tag) {
                     node.children
                         .borrow()
                         .iter()
                         .try_for_each(|node| self.minify(node))?;
                 }
 
-                if !omit_start_element && !omit_end_element(&name.local) {
+                if !omit_start_element && !omit_end_element(tag) {
                     self.write_end_tag(name)?;
                 }
             }
@@ -117,17 +121,19 @@ impl<'a> Minifier<'a> {
         Ok(())
     }
 
+    #[inline]
     fn write_qualified_name(&mut self, name: &QualName) -> io::Result<()> {
         if let Some(ref prefix) = name.prefix {
             self.w
-                .write_all(prefix.deref().to_ascii_lowercase().as_bytes())?;
+                .write_all(prefix.as_ref().to_ascii_lowercase().as_bytes())?;
             self.w.write_all(b":")?;
         }
 
         self.w
-            .write_all(name.local.deref().to_ascii_lowercase().as_bytes())
+            .write_all(name.local.as_ref().to_ascii_lowercase().as_bytes())
     }
 
+    #[inline]
     fn write_start_tag(&mut self, name: &QualName, attrs: &[Attribute]) -> io::Result<()> {
         self.w.write_all(b"<")?;
         self.write_qualified_name(name)?;
@@ -139,17 +145,19 @@ impl<'a> Minifier<'a> {
         self.w.write_all(b">")
     }
 
+    #[inline]
     fn write_end_tag(&mut self, name: &QualName) -> io::Result<()> {
         self.w.write_all(b"</")?;
         self.write_qualified_name(name)?;
         self.w.write_all(b">")
     }
 
+    #[inline]
     fn write_attribute(&mut self, attr: &Attribute) -> io::Result<()> {
         self.w.write_all(b" ")?;
         self.write_qualified_name(&attr.name)?;
 
-        let value = attr.value.deref();
+        let value = attr.value.as_ref();
 
         if value.is_empty() {
             return io::Result::Ok(());
@@ -188,116 +196,110 @@ impl<'a> Minifier<'a> {
 }
 
 fn is_whitespace(c: char) -> bool {
-    match c {
-        '\n' | '\t' => true,
-        _ => c.is_whitespace(),
-    }
+    matches!(c, '\n' | '\t') || c.is_whitespace()
 }
 
-fn omit_start_element(name: &LocalName) -> bool {
-    match name {
-        local_name!("body") | local_name!("head") | local_name!("html") => true,
-        _ => false,
-    }
+fn omit_start_element(name: &str) -> bool {
+    matches!(name, "body" | "head" | "html")
 }
 
 fn is_inline_element(node: &Node) -> bool {
-    match node.data {
-        NodeData::Document => false,
-        NodeData::Element { ref name, .. } => match name.local {
-            local_name!("address")
-            | local_name!("article")
-            | local_name!("aside")
-            | local_name!("blockquote")
-            | local_name!("body")
-            | local_name!("details")
-            | local_name!("dialog")
-            | local_name!("dd")
-            | local_name!("div")
-            | local_name!("dl")
-            | local_name!("dt")
-            | local_name!("fieldset")
-            | local_name!("figcaption")
-            | local_name!("figure")
-            | local_name!("footer")
-            | local_name!("form")
-            | local_name!("h1")
-            | local_name!("h2")
-            | local_name!("h3")
-            | local_name!("h4")
-            | local_name!("h5")
-            | local_name!("h6")
-            | local_name!("head")
-            | local_name!("header")
-            | local_name!("hgroup")
-            | local_name!("hr")
-            | local_name!("li")
-            | local_name!("link")
-            | local_name!("main")
-            | local_name!("meta")
-            | local_name!("nav")
-            | local_name!("ol")
-            | local_name!("p")
-            | local_name!("pre")
-            | local_name!("section")
-            | local_name!("table")
-            | local_name!("title")
-            | local_name!("ul") => false,
-            _ => true,
-        },
-        _ => true,
+    if let NodeData::Element { ref name, .. } = &node.data {
+        !matches!(
+            name.local.as_ref(),
+            "address"
+                | "article"
+                | "aside"
+                | "blockquote"
+                | "body"
+                | "details"
+                | "dialog"
+                | "dd"
+                | "div"
+                | "dl"
+                | "dt"
+                | "fieldset"
+                | "figcaption"
+                | "figure"
+                | "footer"
+                | "form"
+                | "h1"
+                | "h2"
+                | "h3"
+                | "h4"
+                | "h5"
+                | "h6"
+                | "head"
+                | "header"
+                | "hgroup"
+                | "hr"
+                | "li"
+                | "link"
+                | "main"
+                | "meta"
+                | "nav"
+                | "ol"
+                | "p"
+                | "pre"
+                | "section"
+                | "table"
+                | "title"
+                | "ul"
+        )
+    } else {
+        false
     }
 }
 
-fn omit_end_element(name: &LocalName) -> bool {
-    match name {
-        local_name!("area")
-        | local_name!("base")
-        | local_name!("basefont")
-        | local_name!("br")
-        | local_name!("col")
-        | local_name!("colgroup")
-        | local_name!("dd")
-        | local_name!("dt")
-        | local_name!("frame")
-        | local_name!("hr")
-        | local_name!("img")
-        | local_name!("input")
-        | local_name!("isindex")
-        | local_name!("li")
-        | local_name!("link")
-        | local_name!("meta")
-        | local_name!("option")
-        | local_name!("p")
-        | local_name!("param")
-        | local_name!("tbody")
-        | local_name!("td")
-        | local_name!("tfoot")
-        | local_name!("th")
-        | local_name!("thead")
-        | local_name!("tr") => true,
-        _ => false,
-    }
+fn omit_end_element(name: &str) -> bool {
+    matches!(
+        name,
+        "area"
+            | "base"
+            | "basefont"
+            | "br"
+            | "col"
+            | "colgroup"
+            | "dd"
+            | "dt"
+            | "frame"
+            | "hr"
+            | "img"
+            | "input"
+            | "isindex"
+            | "li"
+            | "link"
+            | "meta"
+            | "option"
+            | "p"
+            | "param"
+            | "tbody"
+            | "td"
+            | "tfoot"
+            | "th"
+            | "thead"
+            | "tr"
+    )
 }
 
-fn can_have_children(name: &LocalName) -> bool {
-    match name {
-        local_name!("area")
-        | local_name!("base")
-        | local_name!("br")
-        | local_name!("col")
-        | local_name!("embed")
-        | local_name!("hr")
-        | local_name!("img")
-        | local_name!("input")
-        | local_name!("link")
-        | local_name!("meta")
-        | local_name!("param")
-        | local_name!("source")
-        | local_name!("track")
-        | local_name!("wbr") => false,
-        _ => true,
-    }
+fn can_have_children(name: &str) -> bool {
+    !matches!(
+        name,
+        "area"
+            | "base"
+            | "br"
+            | "col"
+            | "embed"
+            | "hr"
+            | "img"
+            | "input"
+            | "link"
+            | "meta"
+            | "param"
+            | "source"
+            | "track"
+            | "wbr"
+    )
 }
 
 #[cfg(test)]
@@ -306,6 +308,7 @@ mod tests {
 
     use self::test::Bencher;
     use super::*;
+    use std::str;
 
     const HTML: &str = "<html> \n<link href=\"test.css\">\n<h2   id=\"id_one\"    >Hello\n</h2>    \n<p>\nWorld</p>";
 
@@ -314,15 +317,16 @@ mod tests {
         const EXPECTED: &str =
             "<!doctype html><link href=test.css><h2 id=id_one>Hello</h2><p>World";
 
-        assert_eq!(EXPECTED, HTML.minify().expect("Failed to minify HTML"));
+        let minified = HTML.minify().expect("Failed to minify HTML");
+        let minified = str::from_utf8(&minified).expect("Failed to convert to string");
+
+        assert_eq!(EXPECTED, minified);
     }
 
     #[bench]
     fn bench_minify(b: &mut Bencher) {
-        let html = HTML.to_string();
-
         b.iter(|| {
-            html.minify().expect("Failed to minify HTML");
+            HTML.minify().expect("Failed to minify HTML");
         });
     }
 }

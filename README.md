@@ -5,8 +5,8 @@ HTML5 minifier implementation based on Servo's [html5ever](https://github.com/se
 ## Features
 
 - High performance
-- Input using string types or `io::Read`
-- Output to `String` or `io::Write`
+- Input using `AsRef<[u8]>` / `io::Read`
+- Output to `Vec<u8>` / `io::Write`
 
 ## Examples
 

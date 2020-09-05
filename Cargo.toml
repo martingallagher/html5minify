@@ -1,6 +1,6 @@
 [package]
 name = "html5minify"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Martin Gallagher <martin@praegressus.com>"]
 edition = "2018"
 description = "HTML5 minifier implementation based on Servo's html5ever."
@@ -12,4 +12,5 @@ keywords = ["minify", "minifier", "minification", "html", "html5"]
 license = "MIT"
 
 [dependencies]
-html5ever = "0.23"
+html5ever = "0.25"
+markup5ever_rcdom = "0.1"
