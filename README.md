@@ -1,6 +1,6 @@
 # HTML5 minify
 
-HTML5 minifier implementation based on Servo's [html5ever](https://github.com/servo/html5ever).
+HTML5 minifier implementation based on Servo's [html5ever](https://github.com/servo/html5ever). 
 
 ## Features
 
