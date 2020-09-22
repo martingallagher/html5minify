@@ -14,3 +14,10 @@ license = "MIT"
 [dependencies]
 html5ever = "0.25"
 markup5ever_rcdom = "0.1"
+
+[dev-dependencies]
+criterion = "0.3"
+
+[[bench]]
+name = "default"
+harness = false
