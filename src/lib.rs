@@ -1,4 +1,3 @@
-#![feature(test)]
 #![warn(missing_docs)]
 #![deny(warnings, clippy::pedantic, clippy::nursery)]
 
@@ -304,9 +303,6 @@ fn can_have_children(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    extern crate test;
-
-    use self::test::Bencher;
     use super::*;
     use std::str;
 
@@ -321,12 +317,5 @@ mod tests {
         let minified = str::from_utf8(&minified).expect("Failed to convert to string");
 
         assert_eq!(EXPECTED, minified);
-    }
-
-    #[bench]
-    fn bench_minify(b: &mut Bencher) {
-        b.iter(|| {
-            HTML.minify().expect("Failed to minify HTML");
-        });
     }
 }
