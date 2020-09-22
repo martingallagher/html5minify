@@ -272,6 +272,7 @@ fn omit_end_element(name: &str) -> bool {
             | "option"
             | "p"
             | "param"
+            | "source"
             | "tbody"
             | "td"
             | "tfoot"
@@ -295,7 +296,6 @@ fn can_have_children(name: &str) -> bool {
             | "link"
             | "meta"
             | "param"
-            | "source"
             | "track"
             | "wbr"
     )
