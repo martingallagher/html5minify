@@ -1,0 +1,24 @@
+[package]
+name = "html5minify_cli"
+version = "1.0.0"
+authors = ["Martin Gallagher <martin@praegressus.com>"]
+edition = "2018"
+description = "CLI HTML5 minifier implementation based on Servo's html5ever."
+homepage = "https://martingallagher.com/"
+repository = "https://github.com/martingallagher/html5minify.git"
+documentation = "https://docs.rs/html5minify/"
+readme = "README.md"
+keywords = ["minify", "minifier", "minification", "html", "html5", "cli"]
+license = "MIT"
+
+[[bin]]
+name = "html5minify"
+path = "src/main.rs"
+doc = false
+
+[dependencies]
+structopt = "0.3"
+
+[dependencies.html5minify]
+version = "*"
+path = "../"

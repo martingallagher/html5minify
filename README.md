@@ -16,8 +16,3 @@ use html5minify::Minify;
 let html = "<html> \n<link href=\"test.css\">\n<h2   id=\"id_one\"    >Hello\n</h2>    \n<p>\nWorld</p>";
 let minified = html.minify().expect("Failed to minify HTML");
 ```
-
-## TODO
-
-- Inline element space trimming logic
-- Comprehensive test cases
