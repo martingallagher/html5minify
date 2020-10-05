@@ -68,13 +68,7 @@ struct Context<'a> {
 
 impl<'a> Context<'a> {
     /// Determine whether to trim whitespace.
-    ///
-    /// Examples:
-    /// - <block> TEXT </block>: trim left & right
-    /// - </block> TEXT: trim left
-    /// <block> <inline>: trim left
-    /// TEXT    </block>: trim right
-    /// TEXT</inline>  </block>: trim right
+    /// Uses naive HTML5 whitespace collapsing rules.
     fn trim(&self, preceding_whitespace: bool) -> (bool, bool) {
         (preceding_whitespace || self.trim_left(), self.trim_right())
     }
@@ -347,6 +341,8 @@ where
     }
 }
 
+/// Efficiently writes blocks of content, e.g. a string with no collapsed
+/// whitespace would result in a single write.
 fn write_collapse_whitespace<W: io::Write>(
     w: &mut W,
     s: &str,
