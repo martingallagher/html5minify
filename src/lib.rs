@@ -434,6 +434,7 @@ fn is_block_element(node: &Node) -> bool {
     }
 }
 
+#[allow(clippy::missing_const_for_fn)]
 fn is_ascii_whitespace(c: char) -> bool {
     c.is_ascii_whitespace()
 }
