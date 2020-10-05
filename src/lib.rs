@@ -438,7 +438,7 @@ fn is_block_element(node: &Node) -> bool {
     }
 }
 
-const fn is_ascii_whitespace(c: char) -> bool {
+fn is_ascii_whitespace(c: char) -> bool {
     c.is_ascii_whitespace()
 }
 
