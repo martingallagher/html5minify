@@ -451,7 +451,7 @@ const fn check_reserved_entity(v: u8) -> Option<&'static [u8]> {
     }
 }
 
-fn check_reserved_entity_with_apos(v: u8) -> Option<&'static [u8]> {
+const fn check_reserved_entity_with_apos(v: u8) -> Option<&'static [u8]> {
     if v == b'\'' {
         Some(b"&#39;")
     } else {
