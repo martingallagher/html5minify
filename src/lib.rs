@@ -221,11 +221,7 @@ where
 
                 // Second empty check after trimming whitespace
                 if !contents.is_empty() {
-                    self.write_collapse_whitespace(
-                        contents.as_bytes(),
-                        check_reserved_entity,
-                        None,
-                    )?;
+                    self.write_collapse_whitespace(contents.as_bytes(), reserved_entity, None)?;
 
                     self.preceding_whitespace = !trim_right
                         && contents
@@ -354,11 +350,9 @@ where
 
         match (unquoted, double, single) {
             (true, ..) => self.w.write_all(b),
-            (_, true, true) => self.write_attribute_value(b, b"'", check_reserved_entity_with_apos),
-            (_, true, false) => {
-                self.write_attribute_value(b, b"'", check_reserved_entity_with_apos)
-            }
-            _ => self.write_attribute_value(b, b"\"", check_reserved_entity),
+            (_, true, true) => self.write_attribute_value(b, b"'", reserved_entity_with_apos),
+            (_, true, false) => self.write_attribute_value(b, b"'", reserved_entity_with_apos),
+            _ => self.write_attribute_value(b, b"\"", reserved_entity),
         }
     }
 
@@ -389,60 +383,57 @@ where
         f: EntityFn,
         preceding_whitespace: Option<bool>,
     ) -> io::Result<()> {
-        let mut pos = 0;
-        let mut preceding_whitespace = preceding_whitespace.unwrap_or(self.preceding_whitespace);
+        b.iter()
+            .enumerate()
+            .try_fold(
+                (0, preceding_whitespace.unwrap_or(self.preceding_whitespace)),
+                |(pos, preceding_whitespace), (i, &c)| {
+                    let is_whitespace = c.is_ascii_whitespace();
 
-        b.iter().enumerate().try_for_each(|(i, &c)| {
-            let is_whitespace = c.is_ascii_whitespace();
+                    Ok(if is_whitespace && preceding_whitespace {
+                        if i != pos {
+                            self.write(&b[pos..i], f)?;
+                        }
 
-            if is_whitespace && preceding_whitespace {
-                if i != pos {
-                    self.write(&b[pos..i], f)?;
-                }
-
-                // ASCII whitespace = 1 byte
-                pos = i + 1;
-            }
-
-            preceding_whitespace = is_whitespace;
-
-            Ok::<_, io::Error>(())
-        })?;
-
-        if pos < b.len() {
-            self.write(&b[pos..], f)?;
-        }
-
-        Ok(())
+                        // ASCII whitespace = 1 byte
+                        (i + 1, true)
+                    } else {
+                        (pos, is_whitespace)
+                    })
+                },
+            )
+            .and_then(|(pos, _)| {
+                Ok(if pos < b.len() {
+                    self.write(&b[pos..], f)?;
+                })
+            })
     }
 
     fn write(&mut self, b: &[u8], f: EntityFn) -> io::Result<()> {
-        let mut pos = 0;
+        b.iter()
+            .enumerate()
+            .try_fold(0, |pos, (i, &c)| {
+                Ok(if let Some(entity) = f(c) {
+                    self.w.write_all(&b[pos..i])?;
+                    self.w.write_all(entity)?;
 
-        b.iter().enumerate().try_for_each(|(i, &c)| {
-            if let Some(entity) = f(c) {
-                self.w.write_all(&b[pos..i])?;
-                self.w.write_all(entity)?;
-
-                // Reserved characters are 1 byte
-                pos = i + 1;
-            }
-
-            Ok::<_, io::Error>(())
-        })?;
-
-        // Write remaining bytes
-        if pos < b.len() {
-            self.w.write_all(&b[pos..])?;
-        }
-
-        Ok(())
+                    // Reserved characters are 1 byte
+                    i + 1
+                } else {
+                    pos
+                })
+            })
+            .and_then(|pos| {
+                Ok(if pos < b.len() {
+                    self.w.write_all(&b[pos..])?;
+                })
+            })
     }
 }
 
 type EntityFn = fn(u8) -> Option<&'static [u8]>;
 
-const fn check_reserved_entity(v: u8) -> Option<&'static [u8]> {
+const fn reserved_entity(v: u8) -> Option<&'static [u8]> {
     match v {
         b'<' => Some(b"&lt;"),
         b'>' => Some(b"&gt;"),
@@ -451,11 +442,11 @@ const fn check_reserved_entity(v: u8) -> Option<&'static [u8]> {
     }
 }
 
-const fn check_reserved_entity_with_apos(v: u8) -> Option<&'static [u8]> {
+const fn reserved_entity_with_apos(v: u8) -> Option<&'static [u8]> {
     if v == b'\'' {
         Some(b"&#39;")
     } else {
-        check_reserved_entity(v)
+        reserved_entity(v)
     }
 }
 
@@ -593,24 +584,24 @@ mod tests {
 
     #[test]
     fn test_minify() {
-        let entries = glob("testdata/*.html").expect("Failed to read glob pattern");
+        glob("testdata/*.html")
+            .expect("Failed to read glob pattern")
+            .for_each(|path| {
+                let path = path.expect("Failed to get entry");
 
-        for path in entries {
-            let path = path.expect("Failed to get entry");
+                if path.is_dir() {
+                    return;
+                }
 
-            if path.is_dir() {
-                continue;
-            }
+                let html = fs::read_to_string(&path).expect("Failed to read HTML");
+                let path = path.to_string_lossy().to_string();
+                let minified_expected =
+                    fs::read_to_string(path + ".minified").expect("Failed to read minified HTML");
+                let minified = html.minify().expect("Failed to minify HTML");
+                let minified = str::from_utf8(&minified).expect("Failed to convert to string");
 
-            let html = fs::read_to_string(&path).expect("Failed to read HTML");
-            let path = path.to_string_lossy().to_string();
-            let minified_expected =
-                fs::read_to_string(path + ".minified").expect("Failed to read minified HTML");
-            let minified = html.minify().expect("Failed to minify HTML");
-            let minified = str::from_utf8(&minified).expect("Failed to convert to string");
-
-            assert_eq!(minified_expected, minified);
-        }
+                assert_eq!(minified_expected, minified);
+            });
     }
 
     #[test]
