@@ -442,7 +442,7 @@ where
 
 type EntityFn = fn(u8) -> Option<&'static [u8]>;
 
-fn check_reserved_entity(v: u8) -> Option<&'static [u8]> {
+const fn check_reserved_entity(v: u8) -> Option<&'static [u8]> {
     match v {
         b'<' => Some(b"&lt;"),
         b'>' => Some(b"&gt;"),
