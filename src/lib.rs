@@ -83,13 +83,13 @@ impl<'a> Context<'a> {
                 siblings
                     .iter()
                     .rev()
-                    .find(|node| matches!(&node.data, NodeData::Element{..}  ))
+                    .find_map(Self::element_name)
                     .map_or_else(
                         || {
                             // Should short circuit in the majority of cases
                             self.parent_context.map_or(true, Context::trim_left)
                         },
-                        |node| (is_block_element(node)),
+                        is_block_element_name,
                     )
             },
         )
@@ -99,9 +99,17 @@ impl<'a> Context<'a> {
         self.right.map_or(true, |siblings| {
             siblings
                 .iter()
-                .next()
-                .map_or(true, |node| is_block_element(node))
+                .find_map(Self::element_name)
+                .map_or(true, is_block_element_name)
         })
+    }
+
+    fn element_name(node: &Rc<Node>) -> Option<&str> {
+        if let NodeData::Element { name, .. } = &node.data {
+            Some(name.local.as_ref())
+        } else {
+            None
+        }
     }
 }
 
@@ -166,22 +174,35 @@ where
     fn minify_node<'b>(&mut self, ctx: Option<Context<'b>>, node: &'b Node) -> io::Result<()> {
         match &node.data {
             NodeData::Text { contents } => {
-                // Check if whitespace collapsing disabled or parent is whitespace preserving element
-                let skip_collapse_whitespace = !self.collapse_whitespace
-                    || ctx.as_ref().map_or(false, |ctx| {
+                // Check if whitespace collapsing disabled
+                let contents = contents.borrow();
+                let contents = contents.as_ref();
+
+                if !self.collapse_whitespace {
+                    return self.w.write_all(contents.as_bytes());
+                }
+
+                // Check if parent is whitespace preserving element or contains code (<script>, <style>)
+                let (skip_collapse_whitespace, contains_code) =
+                    ctx.as_ref().map_or((false, false), |ctx| {
                         if let NodeData::Element { name, .. } = &ctx.parent.data {
-                            preserve_whitespace(name.local.as_ref())
+                            let name = name.local.as_ref();
+
+                            (preserve_whitespace(name), contains_code(name))
                         } else {
-                            false
+                            (false, false)
                         }
                     });
 
                 if skip_collapse_whitespace {
-                    return self.w.write_all(contents.borrow().as_bytes());
+                    return self.w.write_all(contents.as_bytes());
                 }
 
-                let contents = contents.borrow();
-                let contents = contents.as_ref();
+                if contains_code {
+                    return self
+                        .w
+                        .write_all(contents.trim_matches(is_ascii_whitespace).as_bytes());
+                }
 
                 // Early exit if empty to forego expensive trim logic
                 if contents.is_empty() {
@@ -200,7 +221,11 @@ where
 
                 // Second empty check after trimming whitespace
                 if !contents.is_empty() {
-                    write_collapse_whitespace(self.w, contents, self.preceding_whitespace)?;
+                    self.write_collapse_whitespace(
+                        contents.as_bytes(),
+                        check_reserved_entity,
+                        None,
+                    )?;
 
                     self.preceding_whitespace = !trim_right
                         && contents
@@ -304,6 +329,11 @@ where
         self.write_qualified_name(&attr.name)?;
 
         let value = attr.value.as_ref();
+        let value = if self.collapse_whitespace {
+            value.trim_matches(is_ascii_whitespace)
+        } else {
+            value
+        };
 
         if value.is_empty() {
             return io::Result::Ok(());
@@ -311,66 +341,122 @@ where
 
         self.w.write_all(b"=")?;
 
+        let b = value.as_bytes();
         let (unquoted, double, single) =
-            value
-                .chars()
-                .fold((true, false, false), |(unquoted, double, single), c| {
-                    let (double, single) = (double || c == '"', single || c == '\'');
-                    let unquoted = unquoted && !double && !single && c != '=' && !c.is_whitespace();
+            b.iter()
+                .fold((true, false, false), |(unquoted, double, single), &c| {
+                    let (double, single) = (double || c == b'"', single || c == b'\'');
+                    let unquoted =
+                        unquoted && !double && !single && c != b'=' && !c.is_ascii_whitespace();
 
                     (unquoted, double, single)
                 });
 
-        if unquoted {
-            self.w.write_all(value.as_bytes())
-        } else if double {
-            self.w.write_all(b"'")?;
+        match (unquoted, double, single) {
+            (true, ..) => self.w.write_all(b),
+            (_, true, true) => self.write_attribute_value(b, b"'", check_reserved_entity_with_apos),
+            (_, true, false) => {
+                self.write_attribute_value(b, b"'", check_reserved_entity_with_apos)
+            }
+            _ => self.write_attribute_value(b, b"\"", check_reserved_entity),
+        }
+    }
 
-            if single {
-                self.w.write_all(value.replace('\'', "&#39;").as_bytes())?;
-            } else {
-                self.w.write_all(value.as_bytes())?;
+    fn write_attribute_value<T: AsRef<[u8]>>(
+        &mut self,
+        v: T,
+        quote: &[u8],
+        f: EntityFn,
+    ) -> io::Result<()> {
+        self.w.write_all(quote)?;
+
+        let b = v.as_ref();
+
+        if self.collapse_whitespace {
+            self.write_collapse_whitespace(b, f, Some(false))
+        } else {
+            self.w.write_all(b)
+        }?;
+
+        self.w.write_all(quote)
+    }
+
+    /// Efficiently writes blocks of content, e.g. a string with no collapsed
+    /// whitespace would result in a single write.
+    fn write_collapse_whitespace(
+        &mut self,
+        b: &[u8],
+        f: EntityFn,
+        preceding_whitespace: Option<bool>,
+    ) -> io::Result<()> {
+        let mut pos = 0;
+        let mut preceding_whitespace = preceding_whitespace.unwrap_or(self.preceding_whitespace);
+
+        b.iter().enumerate().try_for_each(|(i, &c)| {
+            let is_whitespace = c.is_ascii_whitespace();
+
+            if is_whitespace && preceding_whitespace {
+                if i != pos {
+                    self.write(&b[pos..i], f)?;
+                }
+
+                // ASCII whitespace = 1 byte
+                pos = i + 1;
             }
 
-            self.w.write_all(b"'")
-        } else {
-            self.w.write_all(b"\"")?;
-            self.w.write_all(value.as_bytes())?;
-            self.w.write_all(b"\"")
+            preceding_whitespace = is_whitespace;
+
+            Ok::<_, io::Error>(())
+        })?;
+
+        if pos < b.len() {
+            self.write(&b[pos..], f)?;
         }
+
+        Ok(())
+    }
+
+    fn write(&mut self, b: &[u8], f: EntityFn) -> io::Result<()> {
+        let mut pos = 0;
+
+        b.iter().enumerate().try_for_each(|(i, &c)| {
+            if let Some(entity) = f(c) {
+                self.w.write_all(&b[pos..i])?;
+                self.w.write_all(entity)?;
+
+                // Reserved characters are 1 byte
+                pos = i + 1;
+            }
+
+            Ok::<_, io::Error>(())
+        })?;
+
+        // Write remaining bytes
+        if pos < b.len() {
+            self.w.write_all(&b[pos..])?;
+        }
+
+        Ok(())
     }
 }
 
-/// Efficiently writes blocks of content, e.g. a string with no collapsed
-/// whitespace would result in a single write.
-fn write_collapse_whitespace<W: io::Write>(
-    w: &mut W,
-    s: &str,
-    mut preceding_whitespace: bool,
-) -> io::Result<()> {
-    let mut pos = 0_usize;
-    let b = s.as_bytes();
+type EntityFn = fn(u8) -> Option<&'static [u8]>;
 
-    b.iter().enumerate().try_for_each(|(i, &c)| {
-        let is_whitespace = c.is_ascii_whitespace();
-
-        if is_whitespace && preceding_whitespace {
-            w.write_all(&b[pos..i])?;
-
-            pos = i + 1;
-        }
-
-        preceding_whitespace = is_whitespace;
-
-        Ok::<_, io::Error>(())
-    })?;
-
-    // Write remaining bytes
-    if pos < s.len() {
-        w.write_all(&b[pos..])?;
+fn check_reserved_entity(v: u8) -> Option<&'static [u8]> {
+    match v {
+        b'<' => Some(b"&lt;"),
+        b'>' => Some(b"&gt;"),
+        b'&' => Some(b"&#38;"),
+        _ => None,
     }
+}
 
-    Ok(())
+fn check_reserved_entity_with_apos(v: u8) -> Option<&'static [u8]> {
+    if v == b'\'' {
+        Some(b"&#39;")
+    } else {
+        check_reserved_entity(v)
+    }
 }
 
 fn omit_start_element(name: &str) -> bool {
@@ -385,6 +471,7 @@ fn is_block_element_name(name: &str) -> bool {
             | "aside"
             | "blockquote"
             | "body"
+            | "br"
             | "details"
             | "dialog"
             | "dd"
@@ -418,8 +505,10 @@ fn is_block_element_name(name: &str) -> bool {
             | "pre"
             | "script"
             | "section"
+            | "source"
             | "table"
             | "td"
+            | "th"
             | "title"
             | "tr"
             | "ul"
@@ -440,7 +529,11 @@ fn is_ascii_whitespace(c: char) -> bool {
 }
 
 fn preserve_whitespace(name: &str) -> bool {
-    matches!(name, "pre" | "textarea" | "script" | "style")
+    matches!(name, "pre" | "textarea")
+}
+
+fn contains_code(name: &str) -> bool {
+    matches!(name, "script" | "style")
 }
 
 fn is_self_closing(name: &str) -> bool {
@@ -535,8 +628,14 @@ mod tests {
         .iter()
         .for_each(|&(input, expected, preceding_whitespace)| {
             let mut w = vec![];
-
-            write_collapse_whitespace(&mut w, input, preceding_whitespace)
+            let mut minifier = Minifier::new(&mut w);
+            minifier.preceding_whitespace = preceding_whitespace;
+            minifier
+                .write_collapse_whitespace(
+                    input.as_bytes(),
+                    check_reserved_entity,
+                    Some(preceding_whitespace),
+                )
                 .expect("Failed to write string");
 
             let s = str::from_utf8(&w).expect("Failed to convert to string");

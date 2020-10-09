@@ -3,5 +3,6 @@
 
 testdata:
 	@for file in testdata/*.html; do
-		cargo run -q --manifest-path htmlminify_cli/Cargo.toml $$file $$file.minified
+		echo $$file
+		cargo run $(CARGO_FLAGS) -q --manifest-path htmlminify_cli/Cargo.toml $$file $$file.minified
 	done

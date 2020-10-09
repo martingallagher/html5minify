@@ -1,8 +1,8 @@
 <!doctype html><link href=test.css><h2 id=id_one>Hello</h2>XYZ
-<em>123</em><p>World<blockquote><a>Link <abbr>HTML</abbr></a> <strong>bold</strong></blockquote><p><span><b>On</b> <em>the Origin</em> of Species <i></i></span><pre>
+<em>123</em><p>World<blockquote><a>Link <abbr data-a="aaaa ∳ &gt; @ bbbbb" data-b='ffhmm " jdjdd &#39;'>HTML</abbr></a> <strong>bold</strong></blockquote><p><span data-c=" hmm wtf"><b>On</b> <em>the Origin</em> of Species <i></i></span><pre>
              ##################
 
              Example of P  RES  ERV ED whitespace     
   
              ##################
-    </pre>
+    </pre><em>EM</em><p>P<source><source><source><p><b></b>
