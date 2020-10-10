@@ -338,7 +338,7 @@ where
         self.w.write_all(b"=")?;
 
         let b = value.as_bytes();
-        let (unquoted, double, single) =
+        let (unquoted, double, _) =
             b.iter()
                 .fold((true, false, false), |(unquoted, double, single), &c| {
                     let (double, single) = (double || c == b'"', single || c == b'\'');
@@ -348,11 +348,12 @@ where
                     (unquoted, double, single)
                 });
 
-        match (unquoted, double, single) {
-            (true, ..) => self.w.write_all(b),
-            (_, true, true) => self.write_attribute_value(b, b"'", reserved_entity_with_apos),
-            (_, true, false) => self.write_attribute_value(b, b"'", reserved_entity_with_apos),
-            _ => self.write_attribute_value(b, b"\"", reserved_entity),
+        if unquoted {
+            self.w.write_all(b)
+        } else if double {
+            self.write_attribute_value(b, b"'", reserved_entity_with_apos)
+        } else {
+            self.write_attribute_value(b, b"\"", reserved_entity)
         }
     }
 
@@ -403,9 +404,11 @@ where
                 },
             )
             .and_then(|(pos, _)| {
-                Ok(if pos < b.len() {
+                if pos < b.len() {
                     self.write(&b[pos..], f)?;
-                })
+                }
+
+                Ok(())
             })
     }
 
@@ -424,9 +427,11 @@ where
                 })
             })
             .and_then(|pos| {
-                Ok(if pos < b.len() {
+                if pos < b.len() {
                     self.w.write_all(&b[pos..])?;
-                })
+                }
+
+                Ok(())
             })
     }
 }
@@ -624,7 +629,7 @@ mod tests {
             minifier
                 .write_collapse_whitespace(
                     input.as_bytes(),
-                    check_reserved_entity,
+                    reserved_entity,
                     Some(preceding_whitespace),
                 )
                 .expect("Failed to write string");
