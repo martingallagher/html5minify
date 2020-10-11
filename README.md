@@ -13,6 +13,15 @@ HTML5 minifier implementation based on Servo's [html5ever](https://github.com/se
 ```rust
 use html5minify::Minify;
 
+// Using Minify trait on &str:
 let html = "<html> \n<link href=\"test.css\">\n<h2   id=\"id_one\"    >Hello\n</h2>    \n<p>\nWorld</p>";
 let minified = html.minify().expect("Failed to minify HTML");
+
+// Using minifier with omit doctype option set:
+let mut minified = vec![];
+
+Minifier::new(&mut minified)
+    .omit_doctype(true)
+    .minify(&mut html.as_bytes())
+    .expect("Failed to minify HTML");
 ```

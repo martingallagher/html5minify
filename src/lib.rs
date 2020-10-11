@@ -583,12 +583,12 @@ fn optional_end_element(name: &str) -> bool {
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::PathBuf;
     use std::str;
 
     use glob::glob;
 
-    #[test]
-    fn test_minify() {
+    fn for_each_test_file(test: fn(&PathBuf)) {
         glob("testdata/*.html")
             .expect("Failed to read glob pattern")
             .for_each(|path| {
@@ -598,15 +598,39 @@ mod tests {
                     return;
                 }
 
-                let html = fs::read_to_string(&path).expect("Failed to read HTML");
-                let path = path.to_string_lossy().to_string();
-                let minified_expected =
-                    fs::read_to_string(path + ".minified").expect("Failed to read minified HTML");
-                let minified = html.minify().expect("Failed to minify HTML");
-                let minified = str::from_utf8(&minified).expect("Failed to convert to string");
-
-                assert_eq!(minified_expected, minified);
+                test(&path)
             });
+    }
+
+    #[test]
+    fn test_minify() {
+        for_each_test_file(|path| {
+            let html = fs::read_to_string(&path).expect("Failed to read HTML");
+            let path = path.to_string_lossy().to_string();
+            let minified_expected =
+                fs::read_to_string(path + ".minified").expect("Failed to read minified HTML");
+            let minified = html.minify().expect("Failed to minify HTML");
+            let minified = str::from_utf8(&minified).expect("Failed to convert to string");
+
+            assert_eq!(minified_expected, minified);
+        });
+    }
+
+    #[test]
+    fn test_minifier() {
+        for_each_test_file(|path| {
+            let html = fs::read(&path).expect("Failed to read HTML");
+            let path = path.to_string_lossy().to_string();
+            let minified_expected =
+                fs::read(path + ".minified").expect("Failed to read minified HTML");
+            let mut minified = vec![];
+
+            Minifier::new(&mut minified)
+                .minify(&mut html.as_slice())
+                .expect("Failed to minify HTML");
+
+            assert_eq!(minified_expected, minified);
+        });
     }
 
     #[test]
