@@ -20,5 +20,5 @@ doc = false
 structopt = "0.3"
 
 [dependencies.html5minify]
-version = "*"
+version = "0.3"
 path = "../"
