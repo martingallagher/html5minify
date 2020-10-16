@@ -1,5 +1,5 @@
 [package]
-name = "html5minify_cli"
+name = "html5minify-cli"
 version = "1.0.0"
 authors = ["Martin Gallagher <martin@praegressus.com>"]
 edition = "2018"
