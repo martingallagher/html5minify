@@ -4,6 +4,8 @@
 //! HTML5 markup minifier.
 
 use std::io;
+use std::rc::Rc;
+use std::str;
 
 use html5ever::tendril::TendrilSink;
 use html5ever::{parse_document, Attribute, ParseOpts, QualName};
@@ -29,12 +31,7 @@ pub trait Minify {
 /// to the output writer.
 #[inline]
 pub fn minify<R: io::Read, W: io::Write>(mut r: &mut R, w: &mut W) -> io::Result<()> {
-    let dom = parse_document(RcDom::default(), ParseOpts::default())
-        .from_utf8()
-        .read_from(&mut r)?;
-
-    w.write_all(b"<!doctype html>")?;
-    Minifier { w }.minify(&dom.document)
+    Minifier::new(w).minify(&mut r)
 }
 
 impl<T> Minify for T
@@ -51,49 +48,201 @@ where
     }
 }
 
-struct Minifier<'a, W: io::Write> {
+/// Minifier implementation for `io::Write`.
+#[allow(clippy::struct_excessive_bools)]
+pub struct Minifier<'a, W: io::Write> {
     w: &'a mut W,
+    omit_doctype: bool,
+    collapse_whitespace: bool,
+    preserve_comments: bool,
+    preceding_whitespace: bool,
+}
+
+/// Holds node positional context.
+struct Context<'a> {
+    parent: &'a Node,
+    parent_context: Option<&'a Context<'a>>,
+    left: Option<&'a [Rc<Node>]>,
+    right: Option<&'a [Rc<Node>]>,
+}
+
+impl<'a> Context<'a> {
+    /// Determine whether to trim whitespace.
+    /// Uses naive HTML5 whitespace collapsing rules.
+    fn trim(&self, preceding_whitespace: bool) -> (bool, bool) {
+        (preceding_whitespace || self.trim_left(), self.trim_right())
+    }
+
+    fn trim_left(&self) -> bool {
+        self.left.map_or_else(
+            || {
+                is_block_element(self.parent)
+                    || self.parent_context.map_or(true, Context::trim_left)
+            },
+            |siblings| {
+                siblings
+                    .iter()
+                    .rev()
+                    .find_map(Self::element_name)
+                    .map_or_else(
+                        || {
+                            // Should short circuit in the majority of cases
+                            self.parent_context.map_or(true, Context::trim_left)
+                        },
+                        is_block_element_name,
+                    )
+            },
+        )
+    }
+
+    fn trim_right(&self) -> bool {
+        self.right.map_or(true, |siblings| {
+            siblings
+                .iter()
+                .find_map(Self::element_name)
+                .map_or(true, is_block_element_name)
+        })
+    }
+
+    fn element_name(node: &Rc<Node>) -> Option<&str> {
+        if let NodeData::Element { name, .. } = &node.data {
+            Some(name.local.as_ref())
+        } else {
+            None
+        }
+    }
 }
 
 impl<'a, W> Minifier<'a, W>
 where
     W: io::Write,
 {
+    /// Creates a new `Minifier` instance.
     #[inline]
-    fn minify(&mut self, node: &Node) -> io::Result<()> {
-        match node.data {
-            NodeData::Text { ref contents } => {
-                let contents = contents.borrow();
-                let trim = node.parent.take().map_or(true, |parent| {
-                    parent
-                        .upgrade()
-                        .map_or(false, |ref parent| !is_inline_element(parent))
-                });
-                let contents = if trim {
-                    contents.trim_matches(is_whitespace)
-                } else {
-                    contents.as_ref()
-                };
+    pub fn new(w: &'a mut W) -> Self {
+        Self {
+            w,
+            omit_doctype: false,
+            collapse_whitespace: true,
+            preserve_comments: false,
+            preceding_whitespace: false,
+        }
+    }
 
+    /// Collapse whitespace between elements and in text when whitespace isn't preserved by default.
+    /// Enabled by default.
+    #[inline]
+    pub fn collapse_whitespace(&mut self, collapse: bool) -> &mut Self {
+        self.collapse_whitespace = collapse;
+        self
+    }
+
+    /// Omit writing the HTML5 doctype.
+    /// Disabled by default.
+    #[inline]
+    pub fn omit_doctype(&mut self, omit: bool) -> &mut Self {
+        self.omit_doctype = omit;
+        self
+    }
+
+    /// Preserve HTML comments.
+    /// Disabled by default.
+    #[inline]
+    pub fn preserve_comments(&mut self, preserve: bool) -> &mut Self {
+        self.preserve_comments = preserve;
+        self
+    }
+
+    /// Minifies the given reader input.
+    ///
+    /// # Errors
+    ///
+    /// Will return `Err` if unable to write to the output writer.
+    #[inline]
+    pub fn minify<R: io::Read>(&mut self, mut r: &mut R) -> io::Result<()> {
+        let dom = parse_document(RcDom::default(), ParseOpts::default())
+            .from_utf8()
+            .read_from(&mut r)?;
+
+        if !self.omit_doctype {
+            self.w.write_all(b"<!doctype html>")?;
+        }
+
+        self.minify_node(None, &dom.document)
+    }
+
+    fn minify_node<'b>(&mut self, ctx: Option<Context<'b>>, node: &'b Node) -> io::Result<()> {
+        match &node.data {
+            NodeData::Text { contents } => {
+                // Check if whitespace collapsing disabled
+                let contents = contents.borrow();
+                let contents = contents.as_ref();
+
+                if !self.collapse_whitespace {
+                    return self.w.write_all(contents.as_bytes());
+                }
+
+                // Check if parent is whitespace preserving element or contains code (<script>, <style>)
+                let (skip_collapse_whitespace, contains_code) =
+                    ctx.as_ref().map_or((false, false), |ctx| {
+                        if let NodeData::Element { name, .. } = &ctx.parent.data {
+                            let name = name.local.as_ref();
+
+                            (preserve_whitespace(name), contains_code(name))
+                        } else {
+                            (false, false)
+                        }
+                    });
+
+                if skip_collapse_whitespace {
+                    return self.w.write_all(contents.as_bytes());
+                }
+
+                if contains_code {
+                    return self
+                        .w
+                        .write_all(contents.trim_matches(is_ascii_whitespace).as_bytes());
+                }
+
+                // Early exit if empty to forego expensive trim logic
                 if contents.is_empty() {
                     return io::Result::Ok(());
                 }
 
-                self.w.write_all(contents.as_bytes())?
+                let (trim_left, trim_right) = ctx
+                    .as_ref()
+                    .map_or((true, true), |ctx| ctx.trim(self.preceding_whitespace));
+                let contents = match (trim_left, trim_right) {
+                    (true, true) => contents.trim_matches(is_ascii_whitespace),
+                    (true, false) => contents.trim_start_matches(is_ascii_whitespace),
+                    (false, true) => contents.trim_end_matches(is_ascii_whitespace),
+                    _ => contents,
+                };
+
+                // Second empty check after trimming whitespace
+                if !contents.is_empty() {
+                    self.write_collapse_whitespace(contents.as_bytes(), reserved_entity, None)?;
+
+                    self.preceding_whitespace = !trim_right
+                        && contents
+                            .as_bytes()
+                            .iter()
+                            .last()
+                            .map_or(false, u8::is_ascii_whitespace);
+                }
+
+                Ok(())
             }
 
-            NodeData::Document => {
-                node.children
-                    .borrow()
-                    .iter()
-                    .try_for_each(|node| self.minify(node))?;
+            NodeData::Comment { contents } if self.preserve_comments => {
+                self.w.write_all(b"<!--")?;
+                self.w.write_all(contents.as_bytes())?;
+                self.w.write_all(b"-->")
             }
 
-            NodeData::Element {
-                ref name,
-                ref attrs,
-                ..
-            } => {
+            NodeData::Document => self.minify_children(ctx, node),
+
+            NodeData::Element { name, attrs, .. } => {
                 let attrs = attrs.borrow();
                 let tag = name.local.as_ref();
                 let omit_start_element = attrs.is_empty() && omit_start_element(tag);
@@ -102,27 +251,49 @@ where
                     self.write_start_tag(name, &attrs)?;
                 }
 
-                if can_have_children(tag) {
-                    node.children
-                        .borrow()
-                        .iter()
-                        .try_for_each(|node| self.minify(node))?;
+                if !is_self_closing(tag) {
+                    self.minify_children(ctx, node)?;
+
+                    if !optional_end_element(tag) {
+                        self.write_end_tag(name)?;
+                    }
                 }
 
-                if !omit_start_element && !omit_end_element(tag) {
-                    self.write_end_tag(name)?;
-                }
+                Ok(())
             }
 
-            _ => (),
+            _ => Ok(()),
         }
-
-        Ok(())
     }
 
-    #[inline]
+    #[allow(clippy::needless_pass_by_value)]
+    fn minify_children(&mut self, ctx: Option<Context>, node: &Node) -> io::Result<()> {
+        let children = node.children.borrow();
+        let l = children.len();
+
+        children.iter().enumerate().try_for_each(|(i, child)| {
+            if self.preceding_whitespace && is_block_element(child) {
+                self.preceding_whitespace = false;
+            }
+
+            self.minify_node(
+                Some(Context {
+                    parent: node,
+                    parent_context: ctx.as_ref(),
+                    left: if i > 0 { Some(&children[..i]) } else { None },
+                    right: if i + 1 < l {
+                        Some(&children[i + 1..])
+                    } else {
+                        None
+                    },
+                }),
+                child,
+            )
+        })
+    }
+
     fn write_qualified_name(&mut self, name: &QualName) -> io::Result<()> {
-        if let Some(ref prefix) = name.prefix {
+        if let Some(prefix) = &name.prefix {
             self.w
                 .write_all(prefix.as_ref().to_ascii_lowercase().as_bytes())?;
             self.w.write_all(b":")?;
@@ -132,7 +303,6 @@ where
             .write_all(name.local.as_ref().to_ascii_lowercase().as_bytes())
     }
 
-    #[inline]
     fn write_start_tag(&mut self, name: &QualName, attrs: &[Attribute]) -> io::Result<()> {
         self.w.write_all(b"<")?;
         self.write_qualified_name(name)?;
@@ -144,19 +314,22 @@ where
         self.w.write_all(b">")
     }
 
-    #[inline]
     fn write_end_tag(&mut self, name: &QualName) -> io::Result<()> {
         self.w.write_all(b"</")?;
         self.write_qualified_name(name)?;
         self.w.write_all(b">")
     }
 
-    #[inline]
     fn write_attribute(&mut self, attr: &Attribute) -> io::Result<()> {
         self.w.write_all(b" ")?;
         self.write_qualified_name(&attr.name)?;
 
         let value = attr.value.as_ref();
+        let value = if self.collapse_whitespace {
+            value.trim_matches(is_ascii_whitespace)
+        } else {
+            value
+        };
 
         if value.is_empty() {
             return io::Result::Ok(());
@@ -164,126 +337,203 @@ where
 
         self.w.write_all(b"=")?;
 
-        let (unquoted, double, single) =
-            value
-                .chars()
-                .fold((true, false, false), |(unquoted, double, single), c| {
-                    let (double, single) = (double || c == '"', single || c == '\'');
-                    let unquoted = unquoted && !double && !single && c != '=' && !c.is_whitespace();
+        let b = value.as_bytes();
+        let (unquoted, double, _) =
+            b.iter()
+                .fold((true, false, false), |(unquoted, double, single), &c| {
+                    let (double, single) = (double || c == b'"', single || c == b'\'');
+                    let unquoted =
+                        unquoted && !double && !single && c != b'=' && !c.is_ascii_whitespace();
 
                     (unquoted, double, single)
                 });
 
         if unquoted {
-            self.w.write_all(value.as_bytes())
+            self.w.write_all(b)
         } else if double {
-            self.w.write_all(b"'")?;
-
-            if single {
-                self.w.write_all(value.replace('\'', "&#39;").as_bytes())?;
-            } else {
-                self.w.write_all(value.as_bytes())?;
-            }
-
-            self.w.write_all(b"'")
+            self.write_attribute_value(b, b"'", reserved_entity_with_apos)
         } else {
-            self.w.write_all(b"\"")?;
-            self.w.write_all(value.as_bytes())?;
-            self.w.write_all(b"\"")
+            self.write_attribute_value(b, b"\"", reserved_entity)
         }
+    }
+
+    fn write_attribute_value<T: AsRef<[u8]>>(
+        &mut self,
+        v: T,
+        quote: &[u8],
+        f: EntityFn,
+    ) -> io::Result<()> {
+        self.w.write_all(quote)?;
+
+        let b = v.as_ref();
+
+        if self.collapse_whitespace {
+            self.write_collapse_whitespace(b, f, Some(false))
+        } else {
+            self.w.write_all(b)
+        }?;
+
+        self.w.write_all(quote)
+    }
+
+    /// Efficiently writes blocks of content, e.g. a string with no collapsed
+    /// whitespace would result in a single write.
+    fn write_collapse_whitespace(
+        &mut self,
+        b: &[u8],
+        f: EntityFn,
+        preceding_whitespace: Option<bool>,
+    ) -> io::Result<()> {
+        b.iter()
+            .enumerate()
+            .try_fold(
+                (0, preceding_whitespace.unwrap_or(self.preceding_whitespace)),
+                |(pos, preceding_whitespace), (i, &c)| {
+                    let is_whitespace = c.is_ascii_whitespace();
+
+                    Ok(if is_whitespace && preceding_whitespace {
+                        if i != pos {
+                            self.write(&b[pos..i], f)?;
+                        }
+
+                        // ASCII whitespace = 1 byte
+                        (i + 1, true)
+                    } else {
+                        (pos, is_whitespace)
+                    })
+                },
+            )
+            .and_then(|(pos, _)| {
+                if pos < b.len() {
+                    self.write(&b[pos..], f)?;
+                }
+
+                Ok(())
+            })
+    }
+
+    fn write(&mut self, b: &[u8], f: EntityFn) -> io::Result<()> {
+        b.iter()
+            .enumerate()
+            .try_fold(0, |pos, (i, &c)| {
+                Ok(if let Some(entity) = f(c) {
+                    self.w.write_all(&b[pos..i])?;
+                    self.w.write_all(entity)?;
+
+                    // Reserved characters are 1 byte
+                    i + 1
+                } else {
+                    pos
+                })
+            })
+            .and_then(|pos| {
+                if pos < b.len() {
+                    self.w.write_all(&b[pos..])?;
+                }
+
+                Ok(())
+            })
     }
 }
 
-fn is_whitespace(c: char) -> bool {
-    matches!(c, '\n' | '\t') || c.is_whitespace()
+type EntityFn = fn(u8) -> Option<&'static [u8]>;
+
+const fn reserved_entity(v: u8) -> Option<&'static [u8]> {
+    match v {
+        b'<' => Some(b"&lt;"),
+        b'>' => Some(b"&gt;"),
+        b'&' => Some(b"&#38;"),
+        _ => None,
+    }
+}
+
+const fn reserved_entity_with_apos(v: u8) -> Option<&'static [u8]> {
+    if v == b'\'' {
+        Some(b"&#39;")
+    } else {
+        reserved_entity(v)
+    }
 }
 
 fn omit_start_element(name: &str) -> bool {
     matches!(name, "body" | "head" | "html")
 }
 
-fn is_inline_element(node: &Node) -> bool {
-    if let NodeData::Element { ref name, .. } = &node.data {
-        !matches!(
-            name.local.as_ref(),
-            "address"
-                | "article"
-                | "aside"
-                | "blockquote"
-                | "body"
-                | "details"
-                | "dialog"
-                | "dd"
-                | "div"
-                | "dl"
-                | "dt"
-                | "fieldset"
-                | "figcaption"
-                | "figure"
-                | "footer"
-                | "form"
-                | "h1"
-                | "h2"
-                | "h3"
-                | "h4"
-                | "h5"
-                | "h6"
-                | "head"
-                | "header"
-                | "hgroup"
-                | "hr"
-                | "li"
-                | "link"
-                | "main"
-                | "meta"
-                | "nav"
-                | "ol"
-                | "p"
-                | "pre"
-                | "section"
-                | "table"
-                | "title"
-                | "ul"
-        )
-    } else {
-        false
-    }
-}
-
-fn omit_end_element(name: &str) -> bool {
+fn is_block_element_name(name: &str) -> bool {
     matches!(
         name,
-        "area"
-            | "base"
-            | "basefont"
+        "address"
+            | "article"
+            | "aside"
+            | "blockquote"
+            | "body"
             | "br"
-            | "col"
-            | "colgroup"
+            | "details"
+            | "dialog"
             | "dd"
+            | "div"
+            | "dl"
             | "dt"
-            | "frame"
+            | "fieldset"
+            | "figcaption"
+            | "figure"
+            | "footer"
+            | "form"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "head"
+            | "header"
+            | "hgroup"
             | "hr"
-            | "img"
-            | "input"
-            | "isindex"
+            | "html"
             | "li"
             | "link"
+            | "main"
             | "meta"
+            | "nav"
+            | "ol"
             | "option"
             | "p"
-            | "param"
+            | "pre"
+            | "script"
+            | "section"
             | "source"
-            | "tbody"
+            | "table"
             | "td"
-            | "tfoot"
             | "th"
-            | "thead"
+            | "title"
             | "tr"
+            | "ul"
     )
 }
 
-fn can_have_children(name: &str) -> bool {
-    !matches!(
+fn is_block_element(node: &Node) -> bool {
+    match &node.data {
+        NodeData::Element { ref name, .. } => is_block_element_name(name.local.as_ref()),
+        NodeData::Document => true,
+        _ => false,
+    }
+}
+
+#[allow(clippy::missing_const_for_fn)]
+fn is_ascii_whitespace(c: char) -> bool {
+    c.is_ascii_whitespace()
+}
+
+fn preserve_whitespace(name: &str) -> bool {
+    matches!(name, "pre" | "textarea")
+}
+
+fn contains_code(name: &str) -> bool {
+    matches!(name, "script" | "style")
+}
+
+fn is_self_closing(name: &str) -> bool {
+    matches!(
         name,
         "area"
             | "base"
@@ -296,26 +546,121 @@ fn can_have_children(name: &str) -> bool {
             | "link"
             | "meta"
             | "param"
+            | "source"
             | "track"
             | "wbr"
+            | "command"
+            | "keygen"
+            | "menuitem"
+    )
+}
+
+fn optional_end_element(name: &str) -> bool {
+    matches!(
+        name,
+        "basefont"
+            | "body"
+            | "colgroup"
+            | "dd"
+            | "dt"
+            | "frame"
+            | "head"
+            | "html"
+            | "isindex"
+            | "li"
+            | "option"
+            | "p"
+            | "tbody"
+            | "td"
+            | "tfoot"
+            | "th"
+            | "thead"
+            | "tr"
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
     use std::str;
 
-    const HTML: &str = "<html> \n<link href=\"test.css\">\n<h2   id=\"id_one\"    >Hello\n</h2>    \n<p>\nWorld</p>";
+    use glob::glob;
+
+    fn for_each_test_file(test: fn(&PathBuf)) {
+        glob("testdata/*.html")
+            .expect("Failed to read glob pattern")
+            .for_each(|path| {
+                let path = path.expect("Failed to get entry");
+
+                if path.is_dir() {
+                    return;
+                }
+
+                test(&path)
+            });
+    }
 
     #[test]
     fn test_minify() {
-        const EXPECTED: &str =
-            "<!doctype html><link href=test.css><h2 id=id_one>Hello</h2><p>World";
+        for_each_test_file(|path| {
+            let html = fs::read_to_string(&path).expect("Failed to read HTML");
+            let path = path.to_string_lossy().to_string();
+            let minified_expected =
+                fs::read_to_string(path + ".minified").expect("Failed to read minified HTML");
+            let minified = html.minify().expect("Failed to minify HTML");
+            let minified = str::from_utf8(&minified).expect("Failed to convert to string");
 
-        let minified = HTML.minify().expect("Failed to minify HTML");
-        let minified = str::from_utf8(&minified).expect("Failed to convert to string");
+            assert_eq!(minified_expected, minified);
+        });
+    }
 
-        assert_eq!(EXPECTED, minified);
+    #[test]
+    fn test_minifier() {
+        for_each_test_file(|path| {
+            let html = fs::read(&path).expect("Failed to read HTML");
+            let path = path.to_string_lossy().to_string();
+            let minified_expected =
+                fs::read(path + ".minified").expect("Failed to read minified HTML");
+            let mut minified = vec![];
+
+            Minifier::new(&mut minified)
+                .minify(&mut html.as_slice())
+                .expect("Failed to minify HTML");
+
+            assert_eq!(minified_expected, minified);
+        });
+    }
+
+    #[test]
+    fn test_write_collapse_whitespace() {
+        [
+            ("", "", false),
+            ("  ", " ", false),
+            ("   ", " ", false),
+            ("   ", "", true),
+            (" x      y  ", " x y ", false),
+            (" x      y  ", "x y ", true),
+            (" x   \n  \t \n   y  ", " x y ", false),
+            (" x   \n  \t \n   y  ", "x y ", true),
+        ]
+        .iter()
+        .for_each(|&(input, expected, preceding_whitespace)| {
+            let mut w = vec![];
+            let mut minifier = Minifier::new(&mut w);
+            minifier.preceding_whitespace = preceding_whitespace;
+            minifier
+                .write_collapse_whitespace(
+                    input.as_bytes(),
+                    reserved_entity,
+                    Some(preceding_whitespace),
+                )
+                .expect("Failed to write string");
+
+            let s = str::from_utf8(&w).expect("Failed to convert to string");
+
+            assert_eq!(expected, s);
+        });
     }
 }

@@ -1,0 +1,8 @@
+<!doctype html><link href=test.css><h2 id=id-example>Header (Block)</h2>XYZ (Floating whitespace)
+<em>Em (Inline)</em><p>Para<blockquote><a>Link <abbr data-a="A ∳ &gt; @ B" data-b='Q " A &#39;'>ABBR Inline</abbr></a> <strong>bold</strong></blockquote><p><span data-c="  Non-breaking space"><b>On</b> <em>the Origin</em> of Species <i></i></span><pre>
+             ##################
+
+             Example of P  RES  ERV ED whitespace     
+  
+             ##################
+    </pre><em>EM</em><p>P<source><source><source><p><b></b>
