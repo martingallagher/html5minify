@@ -75,38 +75,33 @@ impl<'a> Context<'a> {
 
     fn trim_left(&self) -> bool {
         self.left.map_or_else(
-            || {
-                is_block_element(self.parent)
-                    || self.parent_context.map_or(true, Context::trim_left)
-            },
+            || is_block_element(self.parent) || self.parent_trim_left(),
             |siblings| {
                 siblings
                     .iter()
                     .rev()
-                    .find_map(Self::element_name)
-                    .map_or_else(
-                        || {
-                            // Should short circuit in the majority of cases
-                            self.parent_context.map_or(true, Context::trim_left)
-                        },
-                        is_block_element_name,
-                    )
+                    .find_map(Self::is_block_element)
+                    .unwrap_or_else(|| self.parent_trim_left())
             },
         )
+    }
+
+    fn parent_trim_left(&self) -> bool {
+        self.parent_context.map_or(true, Context::trim_left)
     }
 
     fn trim_right(&self) -> bool {
         self.right.map_or(true, |siblings| {
             siblings
                 .iter()
-                .find_map(Self::element_name)
-                .map_or(true, is_block_element_name)
+                .find_map(Self::is_block_element)
+                .unwrap_or(true)
         })
     }
 
-    fn element_name(node: &Rc<Node>) -> Option<&str> {
+    fn is_block_element(node: &Rc<Node>) -> Option<bool> {
         if let NodeData::Element { name, .. } = &node.data {
-            Some(name.local.as_ref())
+            Some(is_block_element_name(name.local.as_ref()))
         } else {
             None
         }

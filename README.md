@@ -1,3 +1,6 @@
+[![Actions Status](https://github.com/martingallagher/html5minify/workflows/ci/badge.svg)](https://github.com/martingallagher/html5minify/actions)
+[![HTML5 minify documentation](https://docs.rs/html5minify/badge.svg)](https://docs.rs/html5minify)
+
 # HTML5 minify
 
 HTML5 minifier implementation based on Servo's [html5ever](https://github.com/servo/html5ever).
