@@ -1,4 +1,4 @@
-[![Actions Status](https://github.com/martingallagher/html5minify/workflows/CI/badge.svg)](https://github.com/martingallagher/html5minify/actions)
+[![Actions Status](https://github.com/martingallagher/html5minify/workflows/ci/badge.svg)](https://github.com/martingallagher/html5minify/actions)
 [![HTML5 minify documentation](https://docs.rs/html5minify/badge.svg)](https://docs.rs/html5minify)
 
 # HTML5 minify
