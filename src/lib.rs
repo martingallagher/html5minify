@@ -3,12 +3,13 @@
 
 //! HTML5 markup minifier.
 
-use std::io;
-use std::rc::Rc;
-use std::str;
+use std::{cell::RefCell, io, rc::Rc, str};
 
-use html5ever::tendril::TendrilSink;
-use html5ever::{parse_document, Attribute, ParseOpts, QualName};
+use html5ever::{
+    parse_document,
+    tendril::{fmt::UTF8, Tendril, TendrilSink},
+    Attribute, ParseOpts, QualName,
+};
 use markup5ever_rcdom::{Node, NodeData, RcDom};
 
 /// Defines the minify trait.
@@ -40,7 +41,7 @@ where
 {
     #[inline]
     fn minify(&self) -> Result<Vec<u8>, io::Error> {
-        let mut minified = Vec::new();
+        let mut minified = vec![];
 
         minify(&mut self.as_ref(), &mut minified)?;
 
@@ -163,10 +164,10 @@ where
             self.w.write_all(b"<!doctype html>")?;
         }
 
-        self.minify_node(None, &dom.document)
+        self.minify_node(&None, &dom.document)
     }
 
-    fn minify_node<'b>(&mut self, ctx: Option<Context<'b>>, node: &'b Node) -> io::Result<()> {
+    fn minify_node<'b>(&mut self, ctx: &'b Option<Context>, node: &'b Node) -> io::Result<()> {
         match &node.data {
             NodeData::Text { contents } => {
                 // Check if whitespace collapsing disabled
@@ -240,18 +241,22 @@ where
             NodeData::Element { name, attrs, .. } => {
                 let attrs = attrs.borrow();
                 let tag = name.local.as_ref();
-                let omit_start_element = attrs.is_empty() && omit_start_element(tag);
 
-                if !omit_start_element {
+                if is_self_closing(tag) {
+                    return self.write_start_tag(name, &attrs);
+                }
+
+                let (omit_start_tag, omit_end_tag) =
+                    self.omit_tags(ctx, node, tag, attrs.is_empty());
+
+                if !omit_start_tag {
                     self.write_start_tag(name, &attrs)?;
                 }
 
-                if !is_self_closing(tag) {
-                    self.minify_children(ctx, node)?;
+                self.minify_children(ctx, node)?;
 
-                    if !optional_end_element(tag) {
-                        self.write_end_tag(name)?;
-                    }
+                if !omit_end_tag {
+                    self.write_end_tag(name)?;
                 }
 
                 Ok(())
@@ -261,8 +266,134 @@ where
         }
     }
 
+    fn next_is_comment<'b, I>(&self, v: I) -> bool
+    where
+        I: IntoIterator<Item = &'b Rc<Node>>,
+    {
+        v.into_iter()
+            .find_map(|node| match &node.data {
+                NodeData::Text { contents } => {
+                    if self.collapse_whitespace && is_whitespace(contents) {
+                        // Blocks of whitespace are skipped
+                        None
+                    } else {
+                        Some(false)
+                    }
+                }
+                NodeData::Comment { .. } => Some(self.preserve_comments),
+                _ => Some(false),
+            })
+            .unwrap_or(false)
+    }
+
+    fn is_whitespace(&self, s: &RefCell<Tendril<UTF8>>) -> Option<bool> {
+        if self.collapse_whitespace && is_whitespace(s) {
+            None
+        } else {
+            Some(
+                !s.borrow()
+                    .as_bytes()
+                    .iter()
+                    .next()
+                    .map_or(false, u8::is_ascii_whitespace),
+            )
+        }
+    }
+
+    /// Determines if start and end tags can be omitted.
+    /// Whitespace rules are ignored if `collapse_whitespace` is enabled.
+    fn omit_tags(
+        &self,
+        ctx: &Option<Context>,
+        node: &Node,
+        name: &str,
+        empty_attributes: bool,
+    ) -> (bool, bool) {
+        ctx.as_ref().map_or((false, false), |ctx| match name {
+            "html" => {
+                // The end tag may be omitted if the <html> element is not immediately followed by a comment.
+                let omit_end = ctx.right.map_or(true, |right| !self.next_is_comment(right));
+                // The start tag may be omitted if the first thing inside the <html> element is not a comment.
+                let omit_start =
+                    empty_attributes && omit_end && !self.next_is_comment(&*node.children.borrow());
+
+                (omit_start, omit_end)
+            }
+            "head" => {
+                // The end tag may be omitted if the first thing following the <head> element is not a space character or a comment.
+                let omit_end = ctx.right.map_or(true, |right| {
+                    right
+                        .iter()
+                        .find_map(|node| match &node.data {
+                            NodeData::Text { contents } => self.is_whitespace(contents),
+                            NodeData::Comment { .. } => {
+                                if self.preserve_comments {
+                                    Some(false)
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => Some(true),
+                        })
+                        .unwrap_or(true)
+                });
+                // The start tag may be omitted if the first thing inside the <head> element is an element.
+                let omit_start = empty_attributes
+                    && omit_end
+                    && node
+                        .children
+                        .borrow()
+                        .iter()
+                        .find_map(|node| match &node.data {
+                            NodeData::Text { contents } => self.is_whitespace(contents),
+                            NodeData::Element { .. } => Some(true),
+                            NodeData::Comment { .. } => {
+                                if self.preserve_comments {
+                                    Some(false)
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => Some(false),
+                        })
+                        .unwrap_or(true);
+
+                (omit_start, omit_end)
+            }
+            "body" => {
+                // The start tag may be omitted if the first thing inside it is not a space character, comment, <script> element or <style> element.
+                let omit_start = empty_attributes
+                    && node
+                        .children
+                        .borrow()
+                        .iter()
+                        .find_map(|node| match &node.data {
+                            NodeData::Text { contents } => self.is_whitespace(contents),
+                            NodeData::Element { name, .. } => {
+                                Some(!matches!(name.local.as_ref(), "script" | "style"))
+                            }
+                            NodeData::Comment { .. } => {
+                                if self.preserve_comments {
+                                    Some(false)
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => Some(true),
+                        })
+                        .unwrap_or(true);
+                // The end tag may be omitted if the <body> element has contents or has a start tag, and is not immediately followed by a comment.
+                let omit_end = ctx.right.map_or(true, |right| !self.next_is_comment(right));
+
+                (omit_start && omit_end, omit_end)
+            }
+            // TODO: comprehensive handling of optional end element rules
+            _ => (false, optional_end_tag(name)),
+        })
+    }
+
     #[allow(clippy::needless_pass_by_value)]
-    fn minify_children(&mut self, ctx: Option<Context>, node: &Node) -> io::Result<()> {
+    fn minify_children(&mut self, ctx: &Option<Context>, node: &Node) -> io::Result<()> {
         let children = node.children.borrow();
         let l = children.len();
 
@@ -272,7 +403,7 @@ where
             }
 
             self.minify_node(
-                Some(Context {
+                &Some(Context {
                     parent: node,
                     parent_context: ctx.as_ref(),
                     left: if i > 0 { Some(&children[..i]) } else { None },
@@ -450,8 +581,8 @@ const fn reserved_entity_with_apos(v: u8) -> Option<&'static [u8]> {
     }
 }
 
-fn omit_start_element(name: &str) -> bool {
-    matches!(name, "body" | "head" | "html")
+fn is_whitespace(s: &RefCell<Tendril<UTF8>>) -> bool {
+    s.borrow().as_bytes().iter().all(u8::is_ascii_whitespace)
 }
 
 fn is_block_element_name(name: &str) -> bool {
@@ -550,17 +681,14 @@ fn is_self_closing(name: &str) -> bool {
     )
 }
 
-fn optional_end_element(name: &str) -> bool {
+fn optional_end_tag(name: &str) -> bool {
     matches!(
         name,
         "basefont"
-            | "body"
             | "colgroup"
             | "dd"
             | "dt"
             | "frame"
-            | "head"
-            | "html"
             | "isindex"
             | "li"
             | "option"
@@ -577,9 +705,7 @@ fn optional_end_element(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use std::path::PathBuf;
-    use std::str;
+    use std::{fs, path::PathBuf, str};
 
     use glob::glob;
 
@@ -651,11 +777,112 @@ mod tests {
                     reserved_entity,
                     Some(preceding_whitespace),
                 )
-                .expect("Failed to write string");
+                .unwrap();
 
-            let s = str::from_utf8(&w).expect("Failed to convert to string");
+            let s = str::from_utf8(&w).unwrap();
 
             assert_eq!(expected, s);
         });
+    }
+
+    #[test]
+    fn test_omit_tags() {
+        [
+            // <html>
+            ("<html>", "", true, false),
+            // Comments ignored
+            ("<html><!-- -->", "", true, false),
+            // Comments preserved
+            ("<html>     <!-- -->    ", "<html><!-- -->", true, true),
+            ("<html><!-- --></html>", "<html><!-- -->", true, true),
+            (
+                "<html><!-- --></html><!-- -->",
+                "<html><!-- --></html><!-- -->",
+                true,
+                true,
+            ),
+            (
+                "<html>    <!-- -->    </html>    <!-- -->    ",
+                "<html><!-- --></html><!-- -->",
+                true,
+                true,
+            ),
+            (
+                "<html>    <!-- -->    </html>    <!-- -->    ",
+                // <body> is implicitly added to the DOM
+                "<html><!-- --><body>        </html><!-- -->",
+                false,
+                true,
+            ),
+            // <head>
+            (
+                "<html>   <head>   <title>A</title>     </head>   <body><p>     B  </p> </body>",
+                "<title>A</title><p>B",
+                true,
+                false,
+            ),
+            (
+                "<html>   <head>   <title>A</title>     </head>   <body><p>     B  </p> </body>",
+                "<head>   <title>A</title>     </head>   <p>     B   ",
+                false,
+                false,
+            ),
+            (
+                "<html>   <head><!-- -->   <title>A</title>     </head>   <body><p>     B  </p> </body>",
+                "<head><!-- --><title>A</title><p>B",
+                true,
+                true,
+            ),
+            // <body>
+            ("<body>", "", true, false),
+            (
+                "<body>    <script>let x = 1;</script>   ",
+                "<body><script>let x = 1;</script>",
+                true,
+                false,
+            ),
+            (
+                "<body>        <style>body{margin:1em}</style>",
+                "<body><style>body{margin:1em}</style>",
+                true,
+                false,
+            ),
+            ("<body>    <p>A", "<p>A", true, false),
+            ("<body id=main>    <p>A", "<body id=main><p>A", true, false),
+            // Retain whitespace, whitespace before <p>
+            (
+                "    <body>    <p>A      ",
+                "<body>    <p>A      ",
+                false,
+                false,
+            ),
+            // Retain whitespace, touching <p>
+            ("<body><p>A</body>", "<p>A", false, false),
+            // Comments ignored
+            ("<body><p>A</body><!-- -->", "<p>A", false, false),
+            // Comments preserved
+            (
+                "<body><p>A</body><!-- -->",
+                "<body><p>A</body><!-- -->",
+                false,
+                true,
+            ),
+        ]
+        .iter()
+        .for_each(
+            |&(input, expected, collapse_whitespace, preserve_comments)| {
+                let mut w = vec![];
+                let mut minifier = Minifier::new(&mut w);
+                minifier
+                    .omit_doctype(true)
+                    .collapse_whitespace(collapse_whitespace)
+                    .preserve_comments(preserve_comments);
+                minifier.minify(&mut input.as_bytes()).unwrap();
+
+                let s = str::from_utf8(&w).unwrap();
+
+                assert_eq!(expected, s);
+            },
+        );
     }
 }

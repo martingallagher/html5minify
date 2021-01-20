@@ -1,0 +1,1 @@
+<!doctype html><title>&lt;body&gt; + &lt;script&gt;</title><body><script>console.assert(document.body);</script>
