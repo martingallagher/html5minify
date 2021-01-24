@@ -1,6 +1,4 @@
-use std::fs::File;
-use std::io;
-use std::path::PathBuf;
+use std::{fs::File, io, path::PathBuf};
 
 use html5minify::Minifier;
 use structopt::StructOpt;
