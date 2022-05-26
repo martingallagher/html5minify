@@ -100,6 +100,14 @@ impl<'a> Context<'a> {
         })
     }
 
+    fn next_element(&self) -> Option<&Rc<Node>> {
+        self.right.and_then(|siblings| {
+            siblings
+                .iter()
+                .find(|node| matches!(node.data, NodeData::Element { .. }))
+        })
+    }
+
     fn is_block_element(node: &Rc<Node>) -> Option<bool> {
         if let NodeData::Element { name, .. } = &node.data {
             Some(is_block_element_name(name.local.as_ref()))
@@ -302,6 +310,7 @@ where
 
     /// Determines if start and end tags can be omitted.
     /// Whitespace rules are ignored if `collapse_whitespace` is enabled.
+    #[allow(clippy::too_many_lines)]
     fn omit_tags(
         &self,
         ctx: &Option<Context>,
@@ -386,6 +395,44 @@ where
                 let omit_end = ctx.right.map_or(true, |right| !self.next_is_comment(right));
 
                 (omit_start && omit_end, omit_end)
+            }
+            "p" => {
+                let omit_end = ctx.next_element().map_or(true, |node| {
+                    if let NodeData::Element { name, .. } = &node.data {
+                        matches!(
+                            name.local.as_ref().to_ascii_lowercase().as_str(),
+                            "address"
+                                | "article"
+                                | "aside"
+                                | "blockquote"
+                                | "div"
+                                | "dl"
+                                | "fieldset"
+                                | "footer"
+                                | "form"
+                                | "h1"
+                                | "h2"
+                                | "h3"
+                                | "h4"
+                                | "h5"
+                                | "h6"
+                                | "header"
+                                | "hr"
+                                | "menu"
+                                | "nav"
+                                | "ol"
+                                | "p"
+                                | "pre"
+                                | "section"
+                                | "table"
+                                | "ul"
+                        )
+                    } else {
+                        false
+                    }
+                });
+
+                (false, omit_end)
             }
             // TODO: comprehensive handling of optional end element rules
             _ => (false, optional_end_tag(name)),
@@ -719,7 +766,7 @@ mod tests {
                     return;
                 }
 
-                test(&path)
+                test(&path);
             });
     }
 
@@ -756,7 +803,7 @@ mod tests {
 
     #[test]
     fn test_write_collapse_whitespace() {
-        [
+        for &(input, expected, preceding_whitespace) in &[
             ("", "", false),
             ("  ", " ", false),
             ("   ", " ", false),
@@ -765,9 +812,7 @@ mod tests {
             (" x      y  ", "x y ", true),
             (" x   \n  \t \n   y  ", " x y ", false),
             (" x   \n  \t \n   y  ", "x y ", true),
-        ]
-        .iter()
-        .for_each(|&(input, expected, preceding_whitespace)| {
+        ] {
             let mut w = vec![];
             let mut minifier = Minifier::new(&mut w);
             minifier.preceding_whitespace = preceding_whitespace;
@@ -782,12 +827,12 @@ mod tests {
             let s = str::from_utf8(&w).unwrap();
 
             assert_eq!(expected, s);
-        });
+        }
     }
 
     #[test]
     fn test_omit_tags() {
-        [
+        for &(input, expected, collapse_whitespace, preserve_comments) in &[
             // <html>
             ("<html>", "", true, false),
             // Comments ignored
@@ -867,10 +912,9 @@ mod tests {
                 false,
                 true,
             ),
-        ]
-        .iter()
-        .for_each(
-            |&(input, expected, collapse_whitespace, preserve_comments)| {
+            // Retain end tag if touching inline element
+            ("<p>Some text</p><button></button>", "<p>Some text</p><button></button>", false, false),
+        ] {
                 let mut w = vec![];
                 let mut minifier = Minifier::new(&mut w);
                 minifier
@@ -882,7 +926,6 @@ mod tests {
                 let s = str::from_utf8(&w).unwrap();
 
                 assert_eq!(expected, s);
-            },
-        );
+            }
     }
 }
